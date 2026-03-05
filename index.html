@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>Monster Fighter - Ultimate Fixed Edition</title>
+    <style>
+        body { 
+            background: #1a1a1a; color: white; 
+            display: flex; flex-direction: column; align-items: center; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 0; overflow: hidden; 
+        }
+        
+        /* 頂部按鈕區 - 確保在最前方 */
+        #top-btns { 
+            position: absolute; top: 20px; right: 20px; 
+            display: flex; gap: 10px; z-index: 999; 
+        }
+        .game-btn { 
+            background: rgba(0,0,0,0.8); border: 2px solid white; color: white; 
+            padding: 10px 20px; cursor: pointer; border-radius: 50px; font-size: 16px;
+            transition: 0.2s;
+        }
+        .game-btn:hover { background: white; color: black; transform: scale(1.05); }
+
+        /* 遊戲 UI 介面 */
+        .ui { 
+            width: 1200px; display: flex; justify-content: space-between; 
+            margin-top: 20px; visibility: hidden; z-index: 50; 
+        }
+        .p-name { font-size: 24px; font-weight: bold; text-shadow: 2px 2px 0 black; margin-bottom: 8px; display: block; }
+
+        .hp-bar { 
+            width: 500px; height: 35px; background-color: #333;
+            background-image: repeating-linear-gradient(180deg, rgba(0,0,0,0.4) 0px, rgba(0,0,0,0.4) 3px, rgba(255,255,255,0.05) 3px, rgba(255,255,255,0.05) 6px);
+            border: 4px solid black; overflow: hidden; position: relative;
+        }
+        .hp-fill { height: 100%; width: 100%; transition: width 0.3s steps(10); box-shadow: inset 0 5px 0 rgba(255,255,255,0.3); }
+
+        canvas { 
+            border: 6px solid #34495e; margin-top: 10px; 
+            image-rendering: pixelated; 
+            box-shadow: 0 0 50px rgba(0,0,0,0.8); cursor: pointer; 
+        }
+        .hint { color: #aaa; margin-top: 15px; font-size: 16px; text-align: center; }
+    </style>
+</head>
+<body>
+
+    <div id="top-btns">
+        <button id="pause-btn" class="game-btn">⏸ Pause (Esc)</button>
+        <button id="mute-btn" class="game-btn">🔊 Music On</button>
+    </div>
+
+    <div id="game-ui" class="ui">
+        <div><span id="p1-name" class="p-name">PLAYER 1</span><div class="hp-bar"><div id="p1-hp" class="hp-fill"></div></div></div>
+        <div><span id="p2-name" class="p-name">PLAYER 2</span><div class="hp-bar"><div id="p2-hp" class="hp-fill"></div></div></div>
+    </div>
+
+    <canvas id="gameCanvas" width="1200" height="600"></canvas>
+    
+    <div class="hint">
+        P1: WASD 移動 / J 攻擊 / K 丟石頭 <br>
+        P2: 方向鍵 移動 / 1 攻擊 / 2 丟石頭
+    </div>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// --- 遊戲狀態 ---
+let gameState = 'menu', isPaused = false, isMuted = false;
+let p1Selected = null, p2Selected = null, winner = "";
+let selectAnimTimer = 0, currentBgIndex = Math.floor(Math.random() * 8);
+let projectiles = [];
+
+// --- 物理常數 ---
+const GRAVITY = 0.6, JUMP_FORCE = -15, ANIM_SPEED = 8, SPRITE_SIZE = 32, FLOOR_Y = 540;
+
+// --- 資源載入 ---
+const sounds = {
+    jump: new Audio('audio/Jump.wav'),
+    hit: new Audio('audio/Hit.wav'),
+    bgm: new Audio('audio/Melatronic - Optimistic pop.mp3') 
+};
+sounds.bgm.loop = true; sounds.bgm.volume = 0.2;
+
+const commonAssets = { rock: new Image() };
+commonAssets.rock.src = 'Rock1.png'; 
+
+const CHAR_TYPES = {
+    Pink: { folder: 'Pink_Monster', maxHp: 100, speed: 6, atk: 20, color: '#ff4b2b', hpFillColor: 'linear-gradient(to bottom, #ff9999, #ff4b2b, #cc0000)' },
+    Dude: { folder: 'Dude_Monster', maxHp: 150, speed: 4, atk: 15, color: '#4facfe', hpFillColor: 'linear-gradient(to bottom, #85e085, #43e97b, #22b14c)' },
+    Owlet: { folder: 'Owlet_Monster', maxHp: 80, speed: 8, atk: 25, color: '#43e97b', hpFillColor: 'linear-gradient(to bottom, #ffffcc, #f1c40f, #cc9900)' }
+};
+
+const allBackgroundImages = Array.from({length:8}, (_, i) => { const img = new Image(); img.src = `background/Summer${i+1}.png`; return img; });
+const allSprites = {};
+Object.keys(CHAR_TYPES).forEach(name => {
+    const f = CHAR_TYPES[name].folder;
+    allSprites[name] = { idle: new Image(), walk: new Image(), jump: new Image(), death: new Image(), attack: new Image(), hurt: new Image(), throw: new Image() };
+    const sub = `sprite/${f}/${f}`;
+    allSprites[name].idle.src = `${sub}_Idle_4.png`;
+    allSprites[name].walk.src = `${sub}_Walk_6.png`;
+    allSprites[name].jump.src = `${sub}_Jump_8.png`;
+    allSprites[name].death.src = `${sub}_Death_8.png`;
+    allSprites[name].attack.src = `${sub}_Attack2_6.png`;
+    allSprites[name].hurt.src = `${sub}_Hurt_4.png`;
+    allSprites[name].throw.src = `${sub}_Throw_4.png`;
+});
+
+// --- UI 互動修復 ---
+const pauseBtn = document.getElementById('pause-btn');
+const muteBtn = document.getElementById('mute-btn');
+
+function togglePause() {
+    if (gameState !== 'playing') return;
+    isPaused = !isPaused;
+    pauseBtn.innerText = isPaused ? "▶ Resume" : "⏸ Pause (Esc)";
+}
+
+pauseBtn.onclick = (e) => { e.stopPropagation(); togglePause(); };
+muteBtn.onclick = (e) => {
+    e.stopPropagation();
+    isMuted = !isMuted;
+    if (!isMuted) sounds.bgm.play().catch(()=>{}); else sounds.bgm.pause();
+    Object.values(sounds).forEach(s => s.muted = isMuted);
+    muteBtn.innerText = isMuted ? "🔇 Muted" : "🔊 Music On";
+};
+
+const keys = {};
+window.addEventListener('keydown', (e) => { 
+    keys[e.key.toLowerCase()] = true;
+    if (e.key === "Escape") togglePause();
+});
+window.addEventListener('keyup', (e) => keys[e.key.toLowerCase()] = false);
+
+// --- 核心邏輯 ---
+function createPlayer(x, controls, type) {
+    const s = CHAR_TYPES[type];
+    return {
+        x, y: 100, vx: 0, vy: 0, width: 120, height: 150,
+        hp: s.maxHp, maxHp: s.maxHp, speed: s.speed, atk: s.atk,
+        dir: x < 600 ? 1 : -1, state: 'idle', frame: 0, animTimer: 0,
+        isGrounded: false, attackActive: false, controls, type, hurtTimer: 0, throwCooldown: 0
+    };
+}
+
+function updatePlayer(p, opp) {
+    if (isPaused || gameState !== 'playing') { if(p.state === 'death') updateAnim(p, opp); return; }
+    if (p.state === 'death') { updateAnim(p, opp); return; }
+    if (p.throwCooldown > 0) p.throwCooldown--;
+
+    if (p.hurtTimer > 0) { p.hurtTimer--; p.state = 'hurt'; p.vx = 0; }
+    else if (p.state === 'attack' || p.state === 'throw') { p.vx = 0; }
+    else {
+        if (keys[p.controls.left]) { p.vx = -p.speed; p.dir = -1; }
+        else if (keys[p.controls.right]) { p.vx = p.speed; p.dir = 1; }
+        else p.vx = 0;
+        if (keys[p.controls.up] && p.isGrounded) { p.vy = JUMP_FORCE; p.isGrounded = false; if(!isMuted) sounds.jump.play(); }
+        if (keys[p.controls.attack] && p.state !== 'attack') { p.state = 'attack'; p.frame = 0; p.attackActive = true; }
+        if (keys[p.controls.throw] && p.state !== 'throw' && p.throwCooldown === 0) { p.state = 'throw'; p.frame = 0; p.throwCooldown = 50; }
+        if (p.state !== 'attack' && p.state !== 'throw') {
+            if (!p.isGrounded) p.state = 'jump'; else if (p.vx !== 0) p.state = 'walk'; else p.state = 'idle';
+        }
+    }
+    p.vy += GRAVITY; p.x += p.vx; p.y += p.vy;
+    if (p.y + p.height > FLOOR_Y) { p.y = FLOOR_Y - p.height; p.vy = 0; p.isGrounded = true; }
+    p.x = Math.max(0, Math.min(canvas.width - p.width, p.x));
+    updateAnim(p, opp);
+}
+
+function updateAnim(p, opp) {
+    p.animTimer++;
+    let speed = (p.state === 'death') ? 12 : ANIM_SPEED;
+    if (p.animTimer % speed === 0) {
+        p.frame++;
+        let maxF = (p.state === 'idle' || p.state === 'hurt' || p.state === 'throw') ? 4 : (p.state === 'walk' || p.state === 'attack') ? 6 : 8;
+        if (p.state === 'attack' && p.frame === 3 && p.attackActive) { 
+            const hitW = 100, hitX = p.dir === 1 ? p.x + 60 : p.x - 40;
+            if (hitX < opp.x + opp.width && hitX + hitW > opp.x && p.y < opp.y + opp.height && p.y + p.height > opp.y) takeDamage(opp, p.atk);
+            p.attackActive = false; 
+        }
+        if (p.state === 'throw' && p.frame === 2) { projectiles.push({ x: p.x + (p.dir === 1 ? 90 : -20), y: p.y + 60, vx: p.dir * 10, owner: p }); }
+        if (p.frame >= maxF) {
+            if (p.state === 'death') p.frame = maxF - 1;
+            else if (p.state === 'attack' || p.state === 'hurt' || p.state === 'throw') { p.state = 'idle'; p.frame = 0; }
+            else p.frame = 0;
+        }
+    }
+}
+
+function takeDamage(target, amt) {
+    if (target.state === 'death') return;
+    target.hp -= amt; target.hurtTimer = 15; target.frame = 0;
+    if(!isMuted) { sounds.hit.currentTime = 0; sounds.hit.play(); }
+    document.getElementById(target === p1 ? 'p1-hp' : 'p2-hp').style.width = Math.max(0, (target.hp/target.maxHp)*100) + '%';
+    if (target.hp <= 0) { target.hp = 0; target.state = 'death'; target.frame = 0; winner = (target === p1) ? "PLAYER 2" : "PLAYER 1"; gameState = 'result'; }
+}
+
+function drawPlayer(p) {
+    ctx.save(); ctx.translate(p.x + (p.dir === -1 ? p.width : 0), p.y);
+    if (p.dir === -1) ctx.scale(-1, 1);
+    const img = allSprites[p.type][p.state];
+    if (img && img.complete && img.width > 0) {
+        let maxF = (p.state === 'idle' || p.state === 'hurt' || p.state === 'throw') ? 4 : (p.state === 'walk' || p.state === 'attack') ? 6 : 8;
+        ctx.drawImage(img, (p.frame % maxF) * SPRITE_SIZE, 0, SPRITE_SIZE, SPRITE_SIZE, -15, -15, p.width + 30, p.height + 30);
+    } else { ctx.fillStyle = CHAR_TYPES[p.type].color; ctx.fillRect(0,0,p.width,p.height); }
+    ctx.restore();
+}
+
+function drawStatBar(x, y, label, val, max, color) {
+    const barWidth = 160; const barHeight = 12;
+    ctx.fillStyle = "rgba(255,255,255,0.2)"; ctx.fillRect(x, y, barWidth, barHeight);
+    ctx.fillStyle = color; const fillWidth = (val / max) * barWidth; ctx.fillRect(x, y, fillWidth, barHeight);
+    ctx.fillStyle = "white"; ctx.font = "bold 14px Arial"; ctx.textAlign = "right"; ctx.fillText(label, x - 10, y + 11);
+    ctx.textAlign = "center"; 
+}
+
+function loop() {
+    const bg = allBackgroundImages[currentBgIndex];
+    if (bg.complete) ctx.drawImage(bg, 0, 0, 1200, 600); else { ctx.fillStyle = "#222"; ctx.fillRect(0,0,1200,600); }
+
+    if (gameState === 'menu') {
+        ctx.fillStyle = "rgba(0,0,0,0.6)"; ctx.fillRect(0,0,1200,600);
+        ctx.textAlign="center"; ctx.fillStyle="white"; ctx.font="bold 80px Arial"; ctx.fillText("MONSTER FIGHTER", 600, 250);
+        if (Math.floor(Date.now()/500)%2===0) { ctx.font="30px Arial"; ctx.fillStyle="#f1c40f"; ctx.fillText("CLICK TO START", 600, 380); }
+    } else if (gameState === 'select') {
+        selectAnimTimer++; ctx.fillStyle="rgba(0,0,0,0.8)"; ctx.fillRect(0,0,1200,600);
+        ctx.textAlign="center"; ctx.fillStyle="white"; ctx.font="bold 45px Arial"; ctx.fillText("選擇你的怪獸", 600, 80);
+        Object.keys(CHAR_TYPES).forEach((name, i) => {
+            const cx = 300 + i * 300, cy = 250, s = CHAR_TYPES[name];
+            ctx.beginPath(); ctx.arc(cx, cy, 100, 0, Math.PI * 2); 
+            ctx.fillStyle = (p1Selected === name || p2Selected === name) ? "rgba(241, 196, 15, 0.3)" : "rgba(255,255,255,0.1)"; ctx.fill();
+            ctx.strokeStyle = (p1Selected === name || p2Selected === name) ? "#f1c40f" : "white"; ctx.lineWidth = 5; ctx.stroke();
+            const img = allSprites[name].idle;
+            if (img.complete) ctx.drawImage(img, (Math.floor(selectAnimTimer / 10) % 4) * 32, 0, 32, 32, cx - 75, cy - 75, 150, 150);
+            ctx.fillStyle = "white"; ctx.font = "bold 28px Arial"; ctx.fillText(name, cx, cy + 140);
+            // 🚩 補回能力條
+            drawStatBar(cx - 80, cy + 170, "HP", s.maxHp, 150, "#ff416c");
+            drawStatBar(cx - 80, cy + 195, "SPD", s.speed, 10, "#4facfe");
+            drawStatBar(cx - 80, cy + 220, "ATK", s.atk, 30, "#f1c40f");
+            if (p1Selected === name) { ctx.fillStyle = "#ff4b2b"; ctx.font = "bold 20px Arial"; ctx.fillText("P1 SELECTED", cx, cy - 120); }
+            else if (p2Selected === name) { ctx.fillStyle = "#4facfe"; ctx.font = "bold 20px Arial"; ctx.fillText("P2 SELECTED", cx, cy - 120); }
+        });
+    } else {
+        updatePlayer(p1, p2); updatePlayer(p2, p1);
+        if (!isPaused) {
+            for (let i = projectiles.length - 1; i >= 0; i--) {
+                const prj = projectiles[i]; prj.x += prj.vx;
+                const target = prj.owner === p1 ? p2 : p1;
+                if (prj.x > target.x && prj.x < target.x + target.width && prj.y > target.y && prj.y < target.y + target.height) {
+                    takeDamage(target, prj.owner.atk * 0.7); projectiles.splice(i, 1);
+                } else if (prj.x < -50 || prj.x > 1250) projectiles.splice(i, 1);
+            }
+        }
+        drawPlayer(p1); drawPlayer(p2);
+        projectiles.forEach(prj => {
+            if (commonAssets.rock.complete && commonAssets.rock.width > 0) {
+                ctx.save(); ctx.translate(prj.x+20, prj.y+20); ctx.rotate((Date.now()/100)%(Math.PI*2));
+                ctx.drawImage(commonAssets.rock, 0,0,32,32,-20,-20,40,40); ctx.restore();
+            } else { ctx.fillStyle="#888"; ctx.beginPath(); ctx.arc(prj.x+20,prj.y+20,15,0,Math.PI*2); ctx.fill(); }
+        });
+        if (isPaused) { ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillRect(0,0,1200,600); ctx.textAlign="center"; ctx.fillStyle="white"; ctx.font="bold 70px Arial"; ctx.fillText("PAUSED", 600, 300); }
+        if (gameState === 'result') {
+            ctx.fillStyle="rgba(0,0,0,0.8)"; ctx.fillRect(0,0,1200,600);
+            ctx.textAlign="center"; ctx.fillStyle="#f1c40f"; ctx.font="bold 80px Arial"; ctx.fillText(winner + " WINS!", 600, 250);
+            ctx.fillStyle="white"; ctx.fillRect(350, 350, 200, 60); ctx.fillRect(650, 350, 200, 60);
+            ctx.fillStyle="black"; ctx.font="bold 22px Arial"; ctx.fillText("REPLAY", 450, 388); ctx.fillText("NEW CHARS", 750, 388);
+        }
+    }
+    requestAnimationFrame(loop);
+}
+
+canvas.addEventListener('mousedown', (e) => {
+    const rect = canvas.getBoundingClientRect(), mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    if (gameState === 'menu') { gameState = 'select'; if(!isMuted) sounds.bgm.play().catch(()=>{}); } 
+    else if (gameState === 'select') {
+        Object.keys(CHAR_TYPES).forEach((name, i) => { if (Math.sqrt((mx-(300+i*300))**2 + (my-250)**2) < 90) { if (!p1Selected) p1Selected = name; else if (!p2Selected) { p2Selected = name; startGame(); } } });
+    } else if (gameState === 'result') {
+        if (mx > 350 && mx < 550 && my > 350 && my < 410) resetGame(false);
+        if (mx > 650 && mx < 850 && my > 350 && my < 410) resetGame(true);
+    }
+});
+
+function startGame() {
+    p1 = createPlayer(200, { up:'w', left:'a', right:'d', attack:'j', throw:'k' }, p1Selected);
+    p2 = createPlayer(880, { up:'arrowup', left:'arrowleft', right:'arrowright', attack:'1', throw:'2' }, p2Selected);
+    gameState = 'playing'; isPaused = false; projectiles = [];
+    document.getElementById('game-ui').style.visibility = 'visible';
+    document.getElementById('p1-name').innerText = p1Selected; document.getElementById('p2-name').innerText = p2Selected;
+    document.getElementById('p1-hp').style.backgroundImage = CHAR_TYPES[p1Selected].hpFillColor;
+    document.getElementById('p2-hp').style.backgroundImage = CHAR_TYPES[p2Selected].hpFillColor;
+    document.getElementById('p1-hp').style.width = '100%'; document.getElementById('p2-hp').style.width = '100%';
+}
+
+function resetGame(back) { 
+    currentBgIndex = Math.floor(Math.random()*8); winner = ""; isPaused = false; projectiles = [];
+    if (back) { p1Selected = null; p2Selected = null; gameState = 'select'; document.getElementById('game-ui').style.visibility='hidden'; } else startGame();
+}
+loop();
+</script>
+</body>
+</html>
